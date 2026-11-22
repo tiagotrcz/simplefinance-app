@@ -1,0 +1,23 @@
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# O app que ocupava este domínio antes instalou um service worker em /sw.js. Este arquivo
+	# substitui o antigo: o navegador baixa, o worker se desinstala e recarrega as abas abertas.
+	# ponytail: pode sair daqui quando nenhum aparelho tiver mais o app antigo.
+	handle /sw.js {
+		header Content-Type "application/javascript"
+		header Cache-Control "no-cache"
+		respond `self.addEventListener("install",()=>self.skipWaiting());self.addEventListener("activate",(e)=>e.waitUntil(self.registration.unregister().then(()=>self.clients.matchAll()).then((cs)=>cs.forEach((c)=>c.navigate(c.url)))));` 200
+	}
+
+	handle {
+		reverse_proxy front:80
+	}
+}

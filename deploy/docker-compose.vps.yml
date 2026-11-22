@@ -1,0 +1,96 @@
+# Deploy numa VM pequena (e2-micro, 1 GB de RAM + 2 GB de swap) com HTTPS pelo Caddy.
+# Uso, a partir da pasta com este arquivo, o Caddyfile e o .env (veja env.example):
+#   docker compose -f docker-compose.vps.yml pull && docker compose -f docker-compose.vps.yml up -d
+# Só o Caddy publica portas (80/443). API e Postgres ficam na rede interna do compose.
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: simplefinance
+      POSTGRES_USER: simplefinance
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina no .env}
+      TZ: America/Sao_Paulo
+    # ponytail: ajuste fixo para 1 GB de RAM; numa VM maior, subir shared_buffers para ~25% da RAM.
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=50", "-c", "work_mem=4MB"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simplefinance"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 256m
+    logging: *logging
+
+  api:
+    image: ghcr.io/tiagotrcz/simplefinance-api:${TAG:?defina no .env}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=simplefinance;Username=simplefinance;Password=${POSTGRES_PASSWORD}
+      ASPNETCORE_URLS: http://+:8080
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"
+      TZ: America/Sao_Paulo
+      # GC de workstation: bem menos memória que o de servidor, suficiente para um usuário.
+      DOTNET_gcServer: "0"
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:?defina no .env}
+      Jwt__AccessTokenMinutes: "15"
+      Jwt__RefreshTokenDays: "30"
+      Totp__EncryptionKey: ${TOTP_ENCRYPTION_KEY:?defina no .env}
+      Cors__AllowedOrigin: https://${DOMAIN:-saveme.harpialab.com}
+      Pluggy__ClientId: ${PLUGGY_CLIENT_ID:?defina no .env}
+      Pluggy__ClientSecret: ${PLUGGY_CLIENT_SECRET:?defina no .env}
+      Pluggy__WebhookPublicUrl: https://${DOMAIN:-saveme.harpialab.com}/api/webhooks/pluggy
+      Pluggy__WebhookSecretValue: ${PLUGGY_WEBHOOK_SECRET:?defina no .env}
+      # Os crons do Hangfire rodam em UTC (não no TZ do container). 09/21 UTC = 06/18 em Brasília.
+      Sync__DailySyncCronExpression: "0 9,21 * * *"
+      Sync__ManualSyncCooldownSeconds: "60"
+      NetWorth__SnapshotCronExpression: "30 3 * * *"
+      Notifications__TelegramBotToken: ${TELEGRAM_BOT_TOKEN:-}
+      Notifications__TelegramChatId: ${TELEGRAM_CHAT_ID:-}
+      Ai__DeepSeekApiKey: ${AI_DEEPSEEK_API_KEY:-}
+      Ai__OpenAiApiKey: ${AI_OPENAI_API_KEY:-}
+      Ai__AnthropicApiKey: ${AI_ANTHROPIC_API_KEY:-}
+      Ai__OpenRouterApiKey: ${AI_OPENROUTER_API_KEY:-}
+    mem_limit: 450m
+    logging: *logging
+
+  front:
+    image: ghcr.io/tiagotrcz/simplefinance-front:${TAG}
+    restart: unless-stopped
+    depends_on:
+      - api
+    mem_limit: 64m
+    logging: *logging
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - front
+    environment:
+      DOMAIN: ${DOMAIN:-saveme.harpialab.com}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: 96m
+    logging: *logging
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
